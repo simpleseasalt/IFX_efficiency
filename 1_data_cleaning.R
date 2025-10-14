@@ -1,72 +1,110 @@
 # | ---------------------------------------
 # | Author: Simplezzz
-# | Date: 2024-08-04 14:41:08
-# | LastEditTime: 2024-08-04 15:26:23
-# | FilePath: \script\1_data_cleaning.R
-# | Description:
+# | Date: 2025-05-27 12:34:23
+# | LastEditTime: 2025-08-19 21:44:55
+# | FilePath: \R_scripts\1_data_cleaning.R
+# | Description: 
 # | ---------------------------------------
 
 library(tidyverse)
-library(vroom)
+library(readxl)
 library(naniar)
 
-# 1---------------------------------------- load data
+fread <- data.table::fread
 
-data_raw <- vroom("data/tidydata_2023.11.8.csv") %>%
+set.seed(2025)
+
+# ---------------------------------------- load data
+
+data_raw <- read_excel("D:/OneDrive/After_work/2025/IFX_efficiency/data/IFX-20250806 - 副本.xlsx")
+
+# ---------------------------------------- missing over 40%
+
+variables_missing_over_40 <- data_raw %>%
+    miss_var_summary() %>%
+    filter(pct_miss >= 40) %>%
+    pull(variable)
+
+data_tidy <- data_raw %>%
+    select(-all_of(variables_missing_over_40), -c(data_source, monitoring_date, Montreal_type)) %>%
     mutate(
-        combine_1 = as.factor(combine_1),
-        combine_2 = as.factor(combine_2),
-        combine_3 = as.factor(combine_3),
-        ADA = as.factor(ADA),
-        gender = as.factor(gender),
-        validaty = as.factor(validaty)
+        age = as.numeric(age),
+        ADA = case_when(
+            ADA == "+" ~ 1,
+            ADA == "-" ~ 0,
+            TRUE ~ NA
+        ),
+        CDAI_before = ifelse(CDAI_before == "/", NA, CDAI_before),
+        monitoring_c = ifelse(monitoring_c == ">45", "45", monitoring_c)
     ) %>%
-    select(monitoring_c, ADA, gender, age, weight, dose, CDAI_before, combine_1, combine_3, CREA, ALT, AST, ALB, WBC, RBC, CDAI_change) %>%
-    tidylog::filter(CDAI_before >= 70) %>%
     mutate(
-        validaty = if_else(CDAI_change > 70, "yes", "no"),
-        validaty = as.factor(validaty)
+        across(c(CDAI_before, monitoring_c, RBC, `D-dimer`, APTT, TT, PT, Fg), as.numeric),
+        across(c(gender, `fecal calprotectin`:MTX, L:behavior_P, dose, Age), as.factor)
+    ) %>%
+    rename(
+        "Montreal_age" = "Age",
+        "Montreal_L" = "L",
+        "Montreal_B" = "behavior_B",
+        "Montreal_P" = "behavior_P",
+    ) %>%
+    mutate(
+        CDAI_change = CDAI_after - CDAI_before,
+        group = ifelse(CDAI_change < -70, 1, 0)
+    ) %>%
+    bind_cols(arrange(miss_case_summary(.), case)) %>%
+    filter(pct_miss < 40) %>%
+    filter(!is.na(group)) %>%
+    rename(
+        "fecal_calprotectin" = "fecal calprotectin",
+        "D_dimer" = "D-dimer",
     )
 
-# 1---------------------------------------- handle missing data
-# 2---------------------------------------- summary missing data
+# ----------------------------------------
 
-data_raw %>%
-    miss_var_summary() %>%
-    mutate(
-        Imputation = case_when(
-            pct_miss == 0 ~ "NA",
-            pct_miss >= 5 ~ "Multiple imputation",
-            variable == "gender" ~ "Majority",
-            TRUE ~ "Median"
-        )
-    ) %>%
-    write_csv("D:/OneDrive/After_work/2023/英夫利西单抗/output/1_missing_data.csv")
+case_missing_over_40 <- data_tidy %>%
+    filter(pct_miss >= 40)
 
-# 2---------------------------------------- simply imputation with median or mojority
+# ---------------------------------------- handle missing data
 
-var_simple_imputation <- data_raw %>%
+var_simple_impute <- data_tidy %>%
     miss_var_summary() %>%
     filter(pct_miss > 0 & pct_miss < 5) %>%
     pull(variable)
 
-data_simply_imputation <- data_raw %>%
-    replace_na(
-        list(
-            CREA = median(.$CREA, na.rm = TRUE),
-            WBC = median(.$WBC, na.rm = TRUE),
-            RBC = median(.$RBC, na.rm = TRUE),
-            age = median(.$age, na.rm = TRUE),
-            gender = "1"
-        )
+data_simply_impute <- data_tidy %>%
+    mutate(
+        CRP_before = impute_median(CRP_before),
+        D_dimer = impute_median(D_dimer),
+        APTT = impute_median(APTT),
+        TT = impute_median(TT),
+        PT = impute_median(PT),
+        Fg = impute_median(Fg),
+        WBC = impute_median(WBC),
+        height = impute_median(height),
+        weight = impute_median(weight),
+        RBC = impute_median(RBC),
+        monitoring_c = impute_median(monitoring_c),
+        Montreal_age = impute_median(Montreal_age),
+        Montreal_L = impute_median(Montreal_L),
+        Montreal_B = impute_median(Montreal_B),
+        Montreal_P = impute_median(Montreal_P)
     ) %>%
-    mutate(patient = as.factor(1:nrow(.)))
+    mutate(
+        dose = impute_mode(dose),
+        fecal_calprotectin = impute_mode(fecal_calprotectin)
+    ) %>%
+    select(-c(name, case, n_miss, pct_miss))
 
-# 2---------------------------------------- multiple imputation
+# ---------------------------------------- 
+
+var_multiple_impute <- data_tidy %>%
+    miss_var_summary() %>%
+    filter(pct_miss >= 5 & pct_miss < 30) %>%
+    pull(variable)
 
 library(mice)
 
-impute_strategy <- mice(data_simply_imputation, m = 5, maxit = 4, method = "rf", seed = 2024)
+impute_strategy <- mice(data_simply_impute, variables = var_multiple_impute,m = 5, maxit = 4, method = "rf", seed = 2025)
 
 data_complete_1 <- complete(impute_strategy, action = 1) %>%
     mutate(imputation = 1)
@@ -84,28 +122,22 @@ data_complete_5 <- complete(impute_strategy, action = 5) %>%
     mutate(imputation = 5)
 
 data_imputed <- bind_rows(data_complete_1, data_complete_2, data_complete_3, data_complete_4, data_complete_5) %>%
-    group_by(patient) %>%
+    group_by(order) %>%
     summarise(
         across(where(is.numeric), mean, na.rm = TRUE),
         across(where(is.factor), ~ factor(levels(.)[which.max(table(.))]))
-    ) %>%
-    relocate(
-        Age = age,
-        Gender = gender,
-        Weight = weight,
-        WBC = WBC,
-        RBC = RBC,
-        ALT = ALT,
-        AST = AST,
-        ALB = ALB,
-        CREA = CREA,
-        ADA = ADA,
-        CDAI_before = CDAI_before,
-        CDAI_change = CDAI_change
-    ) %>%
-    relocate(validaty, .after = last_col()) %>%
-    select(-c(patient, imputation))
+    )
 
-save(data_imputed, file = "output/1_data_imputed.RData")
+# ---------------------------------------- exclude
 
-# ! end
+patient_CDAI_before_less_than_70 <- data_imputed %>%
+    filter(CDAI_before < 70)
+
+data_tidy <- data_imputed %>%
+    filter(!order %in% patient_CDAI_before_less_than_70$order) %>%
+    select(-c(order, imputation)) %>%
+    mutate(group = as.factor(group))
+
+save(data_tidy, file = "output/1_data_tidy.RData")
+
+# ! end 
