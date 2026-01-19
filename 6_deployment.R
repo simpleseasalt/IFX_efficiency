@@ -1,7 +1,7 @@
 # | ---------------------------------------
 # | Author: Simplezzz
 # | Date: 2025-08-21 21:42:08
-# | LastEditTime: 2025-10-14 14:28:37
+# | LastEditTime: 2025-10-17 13:15:02
 # | FilePath: \R_scripts\6_deployment.R
 # | Description: 
 # | ---------------------------------------
@@ -123,8 +123,12 @@ ui <- dashboardPage(
     )
 )
 
-# 定义服务器逻辑
 server <- function(input, output, session) {
+    # Reactive value storage
+    prediction_result <- reactiveVal()
+    input_data_raw <- reactiveVal()
+    batch_results <- reactiveVal()
+
     # Single prediction
     observeEvent(input$predict, {
         # Create input data frame with categorical age
@@ -133,10 +137,11 @@ server <- function(input, output, session) {
             ESR = input$esr,
             CRP_before = input$crp,
             RBC = input$rbc,
-            Montreal_age = factor(input$age,
-                levels = c("1", "2", "3")
-            )
-        ) %>%
+            Montreal_age = factor(input$age, levels = c("1", "2", "3"))
+        )
+
+        # Preprocess the data
+        input_data_processed <- input_data %>%
             bake(IFX_recipe_prep, new_data = .) %>%
             mutate(
                 Montreal_age = case_when(
@@ -151,8 +156,8 @@ server <- function(input, output, session) {
         prediction <- tryCatch(
             {
                 tibble(
-                    .pred_class = predict(final_mod, new_data = input_data, type = "class")$.pred_class,
-                    .pred_Response = predict(final_mod, new_data = input_data, type = "prob")$.pred_1,
+                    .pred_class = predict(final_mod, new_data = input_data_processed, type = "class")$.pred_class,
+                    .pred_Response = predict(final_mod, new_data = input_data_processed, type = "prob")$.pred_1,
                     .pred_Non_response = 1 - .pred_Response
                 ) %>%
                     mutate(.pred_class = ifelse(.pred_class == 1, "Response", "Non-response"))
@@ -168,13 +173,8 @@ server <- function(input, output, session) {
 
         # Store prediction results
         prediction_result(prediction)
-        input_data(input_data)
+        input_data_raw(input_data)
     })
-
-    # Reactive value storage
-    prediction_result <- reactiveVal()
-    input_data <- reactiveVal()
-    batch_results <- reactiveVal()
 
     # Display prediction results
     output$prediction_result <- renderPrint({
@@ -235,27 +235,33 @@ server <- function(input, output, session) {
             return()
         }
 
-        # Convert Age_at_diagnosis to factor
-        data <- data %>%
+        # Convert Age_at_diagnosis to factor and preprocess
+        data_processed <- data %>%
             rename(
                 "CDAI_before" = "CDAI",
                 "CRP_before" = "CRP",
                 "Montreal_age" = "Age_at_diagnosis"
             ) %>%
-            mutate(Montreal_age = factor(Montreal_age
-                levels = c("1", "2", "3"),
-                labels = c("≤16", "16-40", "≥40")
-            ))
+            mutate(Montreal_age = factor(Montreal_age, levels = c("1", "2", "3"))) %>%
+            bake(IFX_recipe_prep, new_data = .) %>%
+            mutate(
+                Montreal_age = case_when(
+                    Montreal_age_X1 == 1 ~ 1,
+                    Montreal_age_X3 == 3 ~ 3,
+                    .default = 2
+                ),
+                Montreal_age = as.factor(Montreal_age)
+            )
 
         # Batch prediction
         predictions <- tryCatch(
             {
-                n <- nrow(data)
                 tibble(
-                    .pred_class = predict(final_mod, new_data, type = "class"),
-                    .pred_Response = predict(final_mod, new_data, type = "prob")$.pred_1,
+                    .pred_class = predict(final_mod, new_data = data_processed, type = "class")$.pred_class,
+                    .pred_Response = predict(final_mod, new_data = data_processed, type = "prob")$.pred_1,
                     .pred_Non_response = 1 - .pred_Response
-                )
+                ) %>%
+                    mutate(.pred_class = ifelse(.pred_class == 1, "Response", "Non-response"))
             },
             error = function(e) {
                 NULL
@@ -284,8 +290,8 @@ server <- function(input, output, session) {
             paste0("prediction_", Sys.Date(), ".csv")
         },
         content = function(file) {
-            req(prediction_result(), input_data())
-            result <- bind_cols(input_data(), prediction_result())
+            req(prediction_result(), input_data_raw())
+            result <- bind_cols(input_data_raw(), prediction_result())
             write_csv(result, file)
         }
     )
@@ -300,7 +306,12 @@ server <- function(input, output, session) {
             write_csv(batch_results(), file)
         }
     )
+    # Delete the temporary files uploaded in this session
+    session$onSessionEnded(function() {
+        if (!is.null(input$userFile)) {
+            unlink(input$userFile$datapath, force = TRUE)
+        }
+    })
 }
 
-# 运行应用
 shinyApp(ui = ui, server = server)

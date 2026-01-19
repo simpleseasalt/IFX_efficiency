@@ -1,16 +1,16 @@
 # | ---------------------------------------
 # | Author: Simplezzz
 # | Date: 2025-08-11 12:58:07
-# | LastEditTime: 2025-10-12 15:12:32
+# | LastEditTime: 2026-01-18 22:41:51
 # | FilePath: \R_scripts\3_model_construction.R
 # | Description: 
 # | ---------------------------------------
 
 library(tidyverse)
 library(tidymodels)
-library(future)
 library(themis)
 library(stacks)
+library(future)
 
 tidymodels_prefer()
 
@@ -24,7 +24,7 @@ load("output/data_model.RData")
 
 # ---------------------------------------- data split
 
-IFX_split <- initial_split(data_tidy, prop = 0.70, strata = group)
+IFX_split <- initial_split(data_tidy, prop = 0.7, strata = group)
 
 IFX_train <- training(IFX_split)
 
@@ -33,10 +33,9 @@ IFX_test <- testing(IFX_split)
 variable_include <- names(data_model)
 
 IFX_recipe <- recipe(group ~ CDAI_before + ESR + Montreal_age + CRP_before + RBC, data = IFX_train) %>%
-    step_normalize(all_numeric()) %>%
+    step_normalize(CDAI_before, ESR, CRP_before, RBC) %>%
     step_dummy(all_nominal_predictors()) %>%
     step_smote(group, over_ratio = 1, seed = 2025)
-
 
 save(IFX_train, file = "output/trainset.RData")
 save(IFX_test, file = "output/testset.RData")
@@ -48,7 +47,7 @@ save(IFX_recipe_prep, file = "output/IFX_recipe.RData")
 
 # ---------------------------------------- model settings
 
-mod_plr <- logistic_reg(penalty = tune()) %>%
+mod_plr <- logistic_reg(penalty = tune(), mixture = tune()) %>%
     set_engine("glmnet") %>%
     set_mode("classification")
 
@@ -81,7 +80,7 @@ IFX_cv <- vfold_cv(IFX_train, strata = "group", repeats = 1, v = 10)
 
 ## --------------------------------------- define multiprocess
 
-plan(multisession, workers = parallel::detectCores() - 2)
+plan(multisession, workers = availableCores() - 2)
 
 ## ---------------------------------------- workflow
 
@@ -91,7 +90,7 @@ IFX_wf <- workflow_set(
     ),
     models = list(
         SVM = mod_svm,
-        PLR = mod_plr,
+        EN = mod_plr,
         RF = mod_rf,
         XGB = mod_xgb
     ),
@@ -100,7 +99,7 @@ IFX_wf <- workflow_set(
     mutate(
         wflow_id = case_when(
             wflow_id == "recipe_SVM" ~ "SVM",
-            wflow_id == "recipe_PLR" ~ "PLR",
+            wflow_id == "recipe_EN" ~ "EN",
             wflow_id == "recipe_RF" ~ "RF",
             wflow_id == "recipe_XGB" ~ "XGBoost",
         )
@@ -138,7 +137,7 @@ updated_mods_plot <- autoplot(
 ) +
     labs(x = "Model Rank", y = "AUROC") +
     scale_shape_discrete(guide = "none") +
-    scale_color_discrete(name = "Models", label = c("XGBoost", "PLR", "RF", "SVM")) +
+    scale_color_discrete(name = "Models", label = c("XGBoost", "EN", "RF", "SVM")) +
     theme_bw() +
     theme(
         axis.title = element_text(size = 18, face = "bold"),
@@ -159,8 +158,8 @@ dev.off()
 ## ---------------------------------------- export result
 ### ---------------------------------------- glm
 
-PLR_tune <- grid_result %>%
-    extract_workflow_set_result("PLR") %>%
+EN_tune <- grid_result %>%
+    extract_workflow_set_result("EN") %>%
     unnest(cols = .metrics) %>%
     filter(.metric == "roc_auc") %>%
     group_by(penalty) %>%
@@ -169,7 +168,7 @@ PLR_tune <- grid_result %>%
         sd = sd(.estimate)
     )
 
-write.csv(PLR_tune, "output/PLR_tune.csv")
+write.csv(EN_tune, "output/EN_tune.csv")
 
 ### ---------------------------------------- svm
 
@@ -220,7 +219,7 @@ mod_best_roc <- grid_result %>%
     filter(.metric == "roc_auc") %>%
     group_by(wflow_id) %>%
     arrange(-mean) %>%
-    slice(1) %>%
+    dplyr::slice(1) %>%
     mutate(best_model = paste(wflow_id, .config, sep = "_"))
 
 updated_result <- grid_result %>%
@@ -272,10 +271,10 @@ dev.off()
 
 # ---------------------------------------- fit on test data
 
-PLR_fit <- finalize_workflow(
-    extract_workflow(grid_result, id = "PLR"),
+EN_fit <- finalize_workflow(
+    extract_workflow(grid_result, id = "EN"),
     select_best(
-        grid_result[grid_result$wflow_id == "PLR", "result"][[1]][[1]],
+        grid_result[grid_result$wflow_id == "EN", "result"][[1]][[1]],
         metric = "roc_auc"
     )
 ) %>%
@@ -321,7 +320,7 @@ SVM_fit <- finalize_workflow(
     )
 
 last_fit_list <- list(
-    PLR_fit,
+    EN_fit,
     RF_fit,
     SVM_fit,
     XGB_fit
@@ -331,7 +330,7 @@ last_fit_res <- last_fit_list %>%
     map(collect_metrics) %>%
     rlist::list.stack() %>%
     mutate(model = c(
-        rep("PLR", nrow(.) / 4),
+        rep("EN", nrow(.) / 4),
         rep("RF", nrow(.) / 4),
         rep("SVM", nrow(.) / 4),
         rep("XGBoost", nrow(.) / 4)
@@ -382,7 +381,7 @@ data_test_roc <- last_fit_list %>%
     as_tibble() %>%
     mutate(
         wflow_id = case_when(
-            wflow_id == 1 ~ "PLR",
+            wflow_id == 1 ~ "EN",
             wflow_id == 2 ~ "XGBoost",
             wflow_id == 3 ~ "RF",
             wflow_id == 4 ~ "SVM",
@@ -444,14 +443,14 @@ stack_wf <- workflow_set(
         recipe = IFX_recipe
     ),
     models = list(
-        PLR = mod_plr,
+        EN = mod_plr,
         RF = mod_rf
     ),
     cross = FALSE
 ) %>%
     mutate(
         wflow_id = case_when(
-            wflow_id == "recipe_PLR" ~ "PLR",
+            wflow_id == "recipe_EN" ~ "EN",
             wflow_id == "recipe_RF" ~ "RF"
         )
     )
@@ -468,14 +467,20 @@ stack_result <- workflow_map(
 )
 
 IFX_stack <- stacks() %>%
-    add_candidates(extract_workflow_set_result(grid_result, "PLR")) %>%
+    add_candidates(extract_workflow_set_result(grid_result, "EN")) %>%
     add_candidates(extract_workflow_set_result(grid_result, "RF"))
 
 IFX_stack_fit <- IFX_stack %>%
     blend_predictions(
-        metric = metrics_result
+        metric = metrics_result,
+        control = tune::control_grid(allow_par = TRUE)
     ) %>%
     fit_members()
+
+cat(
+    "EN 3.36\nRF 2.02\nRF 0.40",
+    file = "output/model_weight.txt"
+)
 
 stack_train_pred <- predict(IFX_stack_fit, IFX_train) %>%
     bind_cols(predict(IFX_stack_fit, IFX_train, type = "prob")) %>%
@@ -554,9 +559,7 @@ final_result <- bind_rows(
     relocate(
         f_meas, roc_auc,
         .after = last_col()
-    )
-
-final_result %>%
+    ) %>%
     rename(
         "Model" = "wflow_id",
         "Accuracy" = "accuracy",
@@ -567,8 +570,11 @@ final_result %>%
         "F score" = "f_meas",
         "AUROC" = "roc_auc"
     ) %>%
-    mutate(across(c(Accuracy:AUROC), format, nsmall = 3, digits = 3)) %>%
-    write_csv(final_result, "output/final_result.csv")
+    arrange(Model) %>%
+    mutate(across(c(Accuracy:AUROC), format, nsmall = 3, digits = 3))
+
+final_result %>%
+    write_csv("output/final_result.csv")
 
 ## --------------------------------------- roc plot
 ### -------------------------------------- trainset
@@ -759,7 +765,7 @@ subgroup_number <- bind_cols(
             count(rf_test_predictions, gender) %>% select(n),
             count(rf_test_predictions, CDAI_group) %>% select(n)
         ),
-        `Clinical response` = bind_rows(
+        `Non-response` = bind_rows(
             count(rf_test_predictions, Montreal_age, group) %>% filter(group == 0) %>% select(n),
             count(rf_test_predictions, gender, group) %>% filter(group == 0) %>% select(n),
             count(rf_test_predictions, CDAI_group, group) %>% filter(group == 0) %>% select(n),
@@ -792,5 +798,9 @@ subgroup_result <- bind_rows(metrics_by_age, metrics_by_gender, metrics_by_CDAI)
     )
 
 write_csv(subgroup_result, file = "output/subgroup_result.csv")
+
+# --------------------------------------- 
+
+save.image("output/IFX_workspace.RData")
 
 # ! end
